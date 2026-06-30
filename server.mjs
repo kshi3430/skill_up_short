@@ -7,6 +7,7 @@ import { buildFallbackScript, generateRecipeScript, generateRecipeScriptFromTitl
 import { generateGeminiScriptFromRecipe, generateGeminiScriptFromTitle } from "./gemini-shorts.mjs";
 import { generateSceneImages } from "./stability-images.mjs";
 import { generateSceneImagesWithOpenAI } from "./openai-images.mjs";
+import { generateSceneImagesWithGemini } from "./gemini-images.mjs";
 import { generateVideoFromScenes } from "./openai-video.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -115,11 +116,21 @@ export function createRequestHandler({
       if (url.pathname === "/api/generate-images" && req.method === "POST") {
         const body = await readJson(req);
         const scenes = validateScenes(body.scenes);
-        if (effectiveApiKey) {
-          return json(res, 200, { provider: "openai", images: await generateSceneImagesWithOpenAI({ apiKey: effectiveApiKey, scenes }) });
+        try {
+          if (effectiveGeminiApiKey) {
+            return json(res, 200, { provider: "gemini", images: await generateSceneImagesWithGemini({ apiKey: effectiveGeminiApiKey, scenes }) });
+          }
+          if (effectiveApiKey) {
+            return json(res, 200, { provider: "openai", images: await generateSceneImagesWithOpenAI({ apiKey: effectiveApiKey, scenes }) });
+          }
+          if (!effectiveStabilityApiKey) return json(res, 400, { error: "이미지 생성을 위해 GEMINI_API_KEY, OPENAI_API_KEY 또는 STABILITY_API_KEY가 필요합니다." });
+          return json(res, 200, { provider: "stability", images: await generateSceneImages({ apiKey: effectiveStabilityApiKey, scenes }) });
+        } catch (error) {
+          if (effectiveStabilityApiKey) {
+            return json(res, 200, { provider: "stability", images: await generateSceneImages({ apiKey: effectiveStabilityApiKey, scenes }) });
+          }
+          throw error;
         }
-        if (!effectiveStabilityApiKey) return json(res, 400, { error: "이미지 생성을 위해 OPENAI_API_KEY 또는 STABILITY_API_KEY가 필요합니다." });
-        return json(res, 200, { provider: "stability", images: await generateSceneImages({ apiKey: effectiveStabilityApiKey, scenes }) });
       }
 
       if (url.pathname === "/api/generate-video" && req.method === "POST") {
