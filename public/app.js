@@ -1,4 +1,4 @@
-const state = { recipes: [], schedules: [], dashboard: null, health: null, page: "dashboard", script: null, images: [] };
+const state = { recipes: [], schedules: [], dashboard: null, health: null, page: "dashboard", script: null, images: [], video: null };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const statusText = { draft: "아이디어", ready: "촬영 준비", published: "업로드 완료", planned: "기획 중", scheduled: "예약 완료" };
@@ -169,9 +169,10 @@ async function generateScript(event) {
 function renderScript() {
   const script = state.script;
   const sourceText = script.source === "gemini" ? "Gemini 초안" : script.source === "ai" ? "OpenAI 초안" : "자동 구성";
-  $("#scriptResult").innerHTML = `<article class="script-sheet"><header><div><p>YOUTUBE SHORTS · ${script.duration} SEC</p><h2>${escapeHtml(script.title)}</h2><p>썸네일: ${escapeHtml(script.thumbnail)} · ${sourceText}</p></div><div class="script-actions"><button class="secondary" id="copyScript">대본 복사</button><button class="primary" id="generateImages" ${state.health?.imageEnabled ? "" : "disabled"}>장면 이미지 4장 생성</button></div></header>${script.scenes.map((scene, index) => `<section class="script-scene"><div class="scene-time"><b>${escapeHtml(scene.range)}</b><span>${escapeHtml(scene.label)}</span></div><div><h3>내레이션 / 자막</h3><p>${escapeHtml(scene.narration)}</p></div><div>${state.images[index] ? `<img class="scene-image" src="${state.images[index].imageDataUrl}" alt="${escapeHtml(scene.label)} 장면 이미지" />` : ""}<h3>촬영 화면</h3><p>${escapeHtml(scene.visual)}</p></div></section>`).join("")}<div class="hashtags">${script.hashtags.map(escapeHtml).join(" ")}</div></article>`;
+  $("#scriptResult").innerHTML = `<article class="script-sheet"><header><div><p>YOUTUBE SHORTS · ${script.duration} SEC</p><h2>${escapeHtml(script.title)}</h2><p>썸네일: ${escapeHtml(script.thumbnail)} · ${sourceText}</p></div><div class="script-actions"><button class="secondary" id="copyScript">대본 복사</button><button class="primary" id="generateImages" ${state.health?.imageEnabled ? "" : "disabled"}>장면 이미지 4장 생성</button><button class="secondary" id="generateVideo" ${state.images.length === 4 ? "" : "disabled"}>영상 만들기</button></div></header>${script.scenes.map((scene, index) => `<section class="script-scene"><div class="scene-time"><b>${escapeHtml(scene.range)}</b><span>${escapeHtml(scene.label)}</span></div><div><h3>내레이션 / 자막</h3><p>${escapeHtml(scene.narration)}</p></div><div>${state.images[index] ? `<img class="scene-image" src="${state.images[index].imageDataUrl}" alt="${escapeHtml(scene.label)} 장면 이미지" />` : ""}<h3>촬영 화면</h3><p>${escapeHtml(scene.visual)}</p></div></section>`).join("")}<div class="hashtags">${script.hashtags.map(escapeHtml).join(" ")}</div>${state.video ? `<div class="video-preview"><video controls src="${state.video.videoDataUrl}"></video></div>` : ""}</article>`;
   $("#copyScript").addEventListener("click", copyScript);
   $("#generateImages").addEventListener("click", generateImages);
+  $("#generateVideo").addEventListener("click", generateVideo);
 }
 
 async function generateImages() {
@@ -185,6 +186,21 @@ async function generateImages() {
     toast("9:16 장면 이미지 4장을 만들었어요.");
   } catch (error) {
     button.disabled = false; button.textContent = "장면 이미지 4장 생성";
+    toast(error.message, true);
+  }
+}
+
+async function generateVideo() {
+  if (!state.images.length) return toast("먼저 이미지 4장을 생성해주세요.", true);
+  const button = $("#generateVideo");
+  button.disabled = true; button.textContent = "영상 생성 중...";
+  try {
+    const result = await api("/api/generate-video", { method: "POST", body: { scenes: state.script.scenes, images: state.images } });
+    state.video = result;
+    renderScript();
+    toast("영상 파일을 만들었어요.");
+  } catch (error) {
+    button.disabled = false; button.textContent = "영상 만들기";
     toast(error.message, true);
   }
 }

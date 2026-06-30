@@ -6,6 +6,8 @@ import { JsonDatabase } from "./db.mjs";
 import { buildFallbackScript, generateRecipeScript, generateRecipeScriptFromTitle, inferRecipeFromTitle, loadEnvFile } from "./openai-shorts.mjs";
 import { generateGeminiScriptFromRecipe, generateGeminiScriptFromTitle } from "./gemini-shorts.mjs";
 import { generateSceneImages } from "./stability-images.mjs";
+import { generateSceneImagesWithOpenAI } from "./openai-images.mjs";
+import { generateVideoFromScenes } from "./openai-video.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
@@ -33,6 +35,8 @@ export function createRequestHandler({
   const effectiveApiKey = normalizeApiKey(apiKey);
   const effectiveGeminiApiKey = normalizeApiKey(geminiApiKey);
   const effectiveStabilityApiKey = normalizeApiKey(stabilityApiKey);
+  const configuredModel = normalizeModel(model);
+  const effectiveModel = effectiveApiKey ? configuredModel : "gpt-5.4-nano";
   const databasePath = process.env.VERCEL
     ? path.join("/tmp", "five-minute-recipe-db.json")
     : path.join(__dirname, "data", "db.json");
@@ -48,7 +52,7 @@ export function createRequestHandler({
         aiEnabled: Boolean(effectiveGeminiApiKey || effectiveApiKey),
         textProvider: effectiveGeminiApiKey ? "gemini" : effectiveApiKey ? "openai" : "template",
         imageEnabled: Boolean(effectiveStabilityApiKey),
-        model: effectiveGeminiApiKey ? "gemini-2.5-flash-lite" : model
+        model: effectiveGeminiApiKey ? "gemini-2.5-flash-lite" : effectiveModel
       });
       if (req.method === "GET" && url.pathname === "/api/dashboard") return json(res, 200, db.dashboard());
 
@@ -97,22 +101,32 @@ export function createRequestHandler({
           const title = requiredText(body.title, "레시피명", 60);
           const result = effectiveGeminiApiKey
             ? await generateGeminiScriptWithFallback({ apiKey: effectiveGeminiApiKey, title, type: "title" })
-            : await generateRecipeScriptFromTitle({ apiKey: effectiveApiKey, model, title, useAI: Boolean(effectiveApiKey) });
+            : await generateRecipeScriptFromTitle({ apiKey: effectiveApiKey, model: effectiveModel, title, useAI: Boolean(effectiveApiKey) });
           return json(res, 200, result);
         }
         const recipe = body.recipeId ? db.getRecipe(String(body.recipeId)) : validateRecipe(body.recipe || body);
         if (!recipe) return json(res, 404, { error: "레시피를 찾을 수 없습니다." });
         const result = effectiveGeminiApiKey
           ? await generateGeminiScriptWithFallback({ apiKey: effectiveGeminiApiKey, recipe, type: "recipe" })
-          : await generateRecipeScript({ apiKey: effectiveApiKey, model, recipe, useAI: Boolean(effectiveApiKey) });
+          : await generateRecipeScript({ apiKey: effectiveApiKey, model: effectiveModel, recipe, useAI: Boolean(effectiveApiKey) });
         return json(res, 200, result);
       }
 
       if (url.pathname === "/api/generate-images" && req.method === "POST") {
-        if (!effectiveStabilityApiKey) return json(res, 400, { error: "STABILITY_API_KEY가 설정되지 않았습니다." });
         const body = await readJson(req);
         const scenes = validateScenes(body.scenes);
+        if (effectiveApiKey) {
+          return json(res, 200, { provider: "openai", images: await generateSceneImagesWithOpenAI({ apiKey: effectiveApiKey, scenes }) });
+        }
+        if (!effectiveStabilityApiKey) return json(res, 400, { error: "이미지 생성을 위해 OPENAI_API_KEY 또는 STABILITY_API_KEY가 필요합니다." });
         return json(res, 200, { provider: "stability", images: await generateSceneImages({ apiKey: effectiveStabilityApiKey, scenes }) });
+      }
+
+      if (url.pathname === "/api/generate-video" && req.method === "POST") {
+        const body = await readJson(req);
+        const scenes = validateScenes(body.scenes);
+        const images = Array.isArray(body.images) ? body.images : [];
+        return json(res, 200, await generateVideoFromScenes({ apiKey: effectiveApiKey, scenes, images }));
       }
 
       if (url.pathname.startsWith("/api/")) return json(res, 404, { error: "API 경로를 찾을 수 없습니다." });
@@ -150,6 +164,11 @@ async function generateGeminiScriptWithFallback({ apiKey, title, recipe, type })
 
 function normalizeApiKey(value) {
   return String(value || "").trim();
+}
+
+function normalizeModel(value) {
+  const model = String(value || "").trim();
+  return model || "gpt-5.4-nano";
 }
 
 function validateRecipe(body) {
