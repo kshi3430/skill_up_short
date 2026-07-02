@@ -34,10 +34,22 @@ npm test
 프로젝트에 준비된 `.env` 파일을 열고 사용할 키를 붙여 넣습니다.
 
 ```env
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen2.5:7b
+IMAGE_API_URL=https://example-image-tunnel/generate
+IMAGE_API_KEY=
+IMAGE_MODEL=
+TTS_API_URL=https://example-tts-tunnel/tts
+TTS_API_KEY=
+TTS_MODEL=
+TTS_VOICE=default
+
 GEMINI_API_KEY=your_gemini_api_key
 STABILITY_API_KEY=your_stability_api_key
 OPENAI_API_KEY=your_openai_api_key
 ```
+
+로컬/팀원 모델을 사용할 때는 위의 Ollama, 이미지 터널, TTS 터널 값을 입력하고 서버를 다시 시작합니다. 터널 API는 Bearer 토큰을 지원하며, 이미지 응답은 이미지 바이너리·base64·data URL·파일 URL을, TTS 응답은 음성 바이너리·base64·data URL·파일 URL을 받을 수 있습니다. OpenAI 호환 API뿐 아니라 `prompt`/`image`, `text`/`audio` 형태의 단순 API도 지원합니다.
 
 `GEMINI_API_KEY`가 있으면 비용 효율적인 stable 모델 `gemini-2.5-flash-lite`가 레시피와 대본을 생성합니다. `STABILITY_API_KEY`가 있으면 대본 화면의 `장면 이미지 4장 생성` 버튼으로 Stability AI Stable Image Core의 9:16 이미지를 만들 수 있습니다. 이미지 생성은 Stability 크레딧을 사용하므로 버튼을 눌렀을 때만 호출합니다.
 
@@ -77,3 +89,6 @@ team_short_pj/
 ```
 
 운영 배포에서는 JSON 파일 대신 PostgreSQL/MySQL 같은 데이터베이스로 `JsonDatabase`를 교체하고, 관리자 로그인과 YouTube Data API 연동을 추가하는 것을 권장합니다.
+
+## 개선방향
+팀명 프로젝트명 프로젝트 소개 사용 기술스택 시스템 구조 실행 방법 및 API 목록 시연화면 또는 화면 캡처 미완성 기능 회고 및 개선 방향

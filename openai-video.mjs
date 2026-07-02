@@ -1,23 +1,30 @@
-export async function generateVideoFromScenes({ apiKey, scenes, images }) {
+import { synthesizeSpeechWithTunnel } from "./tunnel-tts.mjs";
+
+export async function generateVideoFromScenes({ apiKey, scenes, images, ttsUrl = "", ttsApiKey = "", ttsModel = "", ttsVoice = "default" }) {
   const effectiveApiKey = String(apiKey || "").trim();
-  if (!effectiveApiKey) {
-    const error = new Error("OPENAI_API_KEY가 설정되지 않았습니다.");
+  if (!ttsUrl && !effectiveApiKey) {
+    const error = new Error("TTS_API_URL 또는 OPENAI_API_KEY가 설정되지 않았습니다.");
     error.statusCode = 400;
     throw error;
   }
 
-  const audioParts = [];
-  for (const scene of scenes.slice(0, 4)) {
-    const audio = await synthesizeSpeech({ apiKey: effectiveApiKey, text: scene.narration || scene.visual || "" });
-    audioParts.push(audio);
+  const narration = scenes.slice(0, 4)
+    .map((scene) => scene.narration || scene.visual || "")
+    .filter(Boolean)
+    .join("\n\n");
+  let audio;
+  if (ttsUrl) {
+    try {
+      audio = await synthesizeSpeechWithTunnel({ url: ttsUrl, apiKey: ttsApiKey, model: ttsModel, voice: ttsVoice, text: narration });
+    } catch (error) {
+      if (!effectiveApiKey) throw error;
+      audio = await synthesizeSpeech({ apiKey: effectiveApiKey, text: narration });
+    }
+  } else {
+    audio = await synthesizeSpeech({ apiKey: effectiveApiKey, text: narration });
   }
-
-  try {
-    const videoDataUrl = await buildSimpleMp4FromAudio({ audioParts, images: (images || []).slice(0, 4) });
-    return { videoDataUrl };
-  } catch (error) {
-    return { videoDataUrl: createPlaceholderMp4DataUrl(audioParts.length) };
-  }
+  const videoDataUrl = await buildSimpleMp4FromAudio({ audio, images });
+  return { videoDataUrl };
 }
 
 async function synthesizeSpeech({ apiKey, text }) {
@@ -44,7 +51,7 @@ async function synthesizeSpeech({ apiKey, text }) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-async function buildSimpleMp4FromAudio({ audioParts }) {
+async function buildSimpleMp4FromAudio({ audio, images = [] }) {
   const { mkdirSync, rmSync } = await import("node:fs");
   const { writeFile, readFile } = await import("node:fs/promises");
   const path = await import("node:path");
@@ -63,32 +70,59 @@ async function buildSimpleMp4FromAudio({ audioParts }) {
       throw new Error("ffmpeg is not available");
     }
 
-    const audioFiles = [];
-    for (let index = 0; index < audioParts.length; index += 1) {
-      const audioFile = path.join(tmpDir, `scene-${index}.mp3`);
-      await writeFile(audioFile, audioParts[index]);
-      audioFiles.push(audioFile);
+    // The tunnel currently returns WAV while OpenAI returns MP3. ffmpeg detects
+    // the actual codec from the bytes, so the neutral extension handles both.
+    const audioFile = path.join(tmpDir, "narration.audio");
+    await writeFile(audioFile, audio);
+    const { stdout: durationOutput } = await execFileAsync("ffprobe", [
+      "-v", "error", "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1", audioFile
+    ]);
+    const duration = Number.parseFloat(durationOutput.trim());
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error("TTS 음성 길이를 확인하지 못했습니다.");
+    const output = path.join(tmpDir, "output.mp4");
+
+    const firstImage = Array.isArray(images) ? images.find((image) => typeof image?.imageDataUrl === "string") : null;
+    const imageDataUrl = firstImage?.imageDataUrl || "";
+
+    let ffmpegArgs;
+    if (imageDataUrl) {
+      const match = imageDataUrl.match(/^data:(image\/[^;]+);base64,(.+)$/);
+      if (match) {
+        const ext = match[1].split("/")[1] || "png";
+        const imageFile = path.join(tmpDir, `scene.${ext === "jpeg" ? "jpg" : ext}`);
+        await writeFile(imageFile, Buffer.from(match[2], "base64"));
+        ffmpegArgs = [
+          "-loop", "1", "-i", imageFile,
+          "-i", audioFile,
+          "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+          "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
+          "-movflags", "+faststart", output
+        ];
+      } else {
+        ffmpegArgs = [
+          "-f", "lavfi", "-i", `color=c=#1f2923:s=540x960:r=24:d=${duration.toFixed(3)}`,
+          "-i", audioFile,
+          "-shortest", "-c:v", "libx264", "-preset", "ultrafast",
+          "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
+          "-movflags", "+faststart", output
+        ];
+      }
+    } else {
+      ffmpegArgs = [
+        "-f", "lavfi", "-i", `color=c=#1f2923:s=540x960:r=24:d=${duration.toFixed(3)}`,
+        "-i", audioFile,
+        "-shortest", "-c:v", "libx264", "-preset", "ultrafast",
+        "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart", output
+      ];
     }
 
-    const combined = path.join(tmpDir, "combined.mp3");
-    const concatList = path.join(tmpDir, "concat.txt");
-    const concatContent = audioFiles.map((file) => `file '${file.replace(/'/g, "'\\''")}'`).join("\n");
-    await writeFile(concatList, concatContent);
-
-    await execFileAsync("ffmpeg", ["-f", "concat", "-safe", "0", "-i", concatList, "-c", "copy", combined]);
-
-    const output = path.join(tmpDir, "output.mp4");
-    const duration = Math.max(3, Math.min(10, audioFiles.length * 3));
-    await execFileAsync("ffmpeg", ["-f", "lavfi", "-i", `color=c=black:s=1280x720:d=${duration}`, "-i", combined, "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", output]);
+    await execFileAsync("ffmpeg", ffmpegArgs);
 
     const buffer = await readFile(output);
     return `data:video/mp4;base64,${buffer.toString("base64")}`;
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
-}
-
-function createPlaceholderMp4DataUrl(audioCount) {
-  const placeholderText = `placeholder-video-${audioCount}`;
-  return `data:video/mp4;base64,${Buffer.from(placeholderText).toString("base64")}`;
 }

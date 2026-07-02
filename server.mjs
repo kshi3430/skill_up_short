@@ -9,6 +9,8 @@ import { generateSceneImages } from "./stability-images.mjs";
 import { generateSceneImagesWithOpenAI } from "./openai-images.mjs";
 import { generateSceneImagesWithGemini } from "./gemini-images.mjs";
 import { generateVideoFromScenes } from "./openai-video.mjs";
+import { generateOllamaScriptFromRecipe, generateOllamaScriptFromTitle } from "./ollama-shorts.mjs";
+import { generateSceneImagesWithTunnel } from "./tunnel-images.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
@@ -31,17 +33,32 @@ export function createRequestHandler({
   apiKey = process.env.OPENAI_API_KEY || "",
   geminiApiKey = process.env.GEMINI_API_KEY || "",
   stabilityApiKey = process.env.STABILITY_API_KEY || "",
-  model = process.env.OPENAI_MODEL || "gpt-5.4-nano"
+  model = process.env.OPENAI_MODEL || "gpt-5.4-nano",
+  ollamaBaseUrl = process.env.OLLAMA_BASE_URL || "",
+  ollamaModel = process.env.OLLAMA_MODEL || "qwen2.5:7b",
+  imageApiUrl = process.env.IMAGE_API_URL || "",
+  imageApiKey = process.env.IMAGE_API_KEY || "",
+  imageModel = process.env.IMAGE_MODEL || "",
+  ttsApiUrl = process.env.TTS_API_URL || "",
+  ttsApiKey = process.env.TTS_API_KEY || "",
+  ttsModel = process.env.TTS_MODEL || "",
+  ttsVoice = process.env.TTS_VOICE || "default"
 } = {}) {
   const effectiveApiKey = normalizeApiKey(apiKey);
   const effectiveGeminiApiKey = normalizeApiKey(geminiApiKey);
   const effectiveStabilityApiKey = normalizeApiKey(stabilityApiKey);
   const configuredModel = normalizeModel(model);
   const effectiveModel = effectiveApiKey ? configuredModel : "gpt-5.4-nano";
+  const effectiveOllamaUrl = normalizeUrl(ollamaBaseUrl);
+  const effectiveOllamaModel = String(ollamaModel || "qwen2.5:7b").trim();
+  const effectiveImageApiUrl = normalizeUrl(imageApiUrl, false);
+  const effectiveTtsApiUrl = normalizeUrl(ttsApiUrl, false);
   const databasePath = process.env.VERCEL
     ? path.join("/tmp", "five-minute-recipe-db.json")
     : path.join(__dirname, "data", "db.json");
   const db = database || new JsonDatabase(databasePath);
+  const imageJobs = new Map();
+  let imageJobCounter = 0;
 
   return async (req, res) => {
     try {
@@ -50,10 +67,27 @@ export function createRequestHandler({
 
       if (req.method === "GET" && url.pathname === "/api/health") return json(res, 200, {
         ok: true,
-        aiEnabled: Boolean(effectiveGeminiApiKey || effectiveApiKey),
-        textProvider: effectiveGeminiApiKey ? "gemini" : effectiveApiKey ? "openai" : "template",
-        imageEnabled: Boolean(effectiveStabilityApiKey),
-        model: effectiveGeminiApiKey ? "gemini-2.5-flash-lite" : effectiveModel
+        aiEnabled: Boolean(effectiveOllamaUrl || effectiveGeminiApiKey || effectiveApiKey),
+        textProvider: effectiveOllamaUrl
+          ? (effectiveApiKey ? "ollama+openai" : effectiveGeminiApiKey ? "ollama+gemini" : "ollama")
+          : effectiveGeminiApiKey
+          ? (effectiveApiKey ? "gemini+openai" : "gemini")
+          : effectiveApiKey
+          ? "openai"
+          : "template",
+        imageEnabled: Boolean(effectiveImageApiUrl || effectiveStabilityApiKey || effectiveGeminiApiKey || effectiveApiKey),
+        ttsEnabled: Boolean(effectiveTtsApiUrl || effectiveApiKey),
+        imageProvider: effectiveImageApiUrl
+          ? (effectiveApiKey ? "tunnel+openai" : effectiveGeminiApiKey ? "tunnel+gemini" : effectiveStabilityApiKey ? "tunnel+stability" : "tunnel")
+          : effectiveApiKey
+          ? "openai"
+          : effectiveGeminiApiKey
+          ? "gemini"
+          : effectiveStabilityApiKey
+          ? "stability"
+          : "none",
+        ttsProvider: effectiveTtsApiUrl ? (effectiveApiKey ? "tunnel+openai" : "tunnel") : effectiveApiKey ? "openai" : "none",
+        model: effectiveOllamaUrl ? effectiveOllamaModel : effectiveGeminiApiKey ? "gemini-2.5-flash-lite" : effectiveModel
       });
       if (req.method === "GET" && url.pathname === "/api/dashboard") return json(res, 200, db.dashboard());
 
@@ -100,15 +134,45 @@ export function createRequestHandler({
         const body = await readJson(req);
         if (body.title && !body.recipe && !body.recipeId) {
           const title = requiredText(body.title, "레시피명", 60);
-          const result = effectiveGeminiApiKey
-            ? await generateGeminiScriptWithFallback({ apiKey: effectiveGeminiApiKey, title, type: "title" })
+          const result = effectiveOllamaUrl
+            ? await generateScriptWithFallback({
+                providers: [
+                  () => generateOllamaScriptFromTitle({ baseUrl: effectiveOllamaUrl, model: effectiveOllamaModel, title }),
+                  () => generateRecipeScriptFromTitle({ apiKey: effectiveApiKey, model: effectiveModel, title, useAI: Boolean(effectiveApiKey) }),
+                  () => generateGeminiScriptFromTitle({ apiKey: effectiveGeminiApiKey, title })
+                ],
+                title
+              })
+            : effectiveGeminiApiKey
+            ? await generateScriptWithFallback({
+                providers: [
+                  () => generateGeminiScriptFromTitle({ apiKey: effectiveGeminiApiKey, title }),
+                  () => generateRecipeScriptFromTitle({ apiKey: effectiveApiKey, model: effectiveModel, title, useAI: Boolean(effectiveApiKey) })
+                ],
+                title
+              })
             : await generateRecipeScriptFromTitle({ apiKey: effectiveApiKey, model: effectiveModel, title, useAI: Boolean(effectiveApiKey) });
           return json(res, 200, result);
         }
         const recipe = body.recipeId ? db.getRecipe(String(body.recipeId)) : validateRecipe(body.recipe || body);
         if (!recipe) return json(res, 404, { error: "레시피를 찾을 수 없습니다." });
-        const result = effectiveGeminiApiKey
-          ? await generateGeminiScriptWithFallback({ apiKey: effectiveGeminiApiKey, recipe, type: "recipe" })
+        const result = effectiveOllamaUrl
+          ? await generateScriptWithFallback({
+              providers: [
+                () => generateOllamaScriptFromRecipe({ baseUrl: effectiveOllamaUrl, model: effectiveOllamaModel, recipe }),
+                () => generateRecipeScript({ apiKey: effectiveApiKey, model: effectiveModel, recipe, useAI: Boolean(effectiveApiKey) }),
+                () => generateGeminiScriptFromRecipe({ apiKey: effectiveGeminiApiKey, recipe })
+              ],
+              recipe
+            })
+          : effectiveGeminiApiKey
+          ? await generateScriptWithFallback({
+              providers: [
+                () => generateGeminiScriptFromRecipe({ apiKey: effectiveGeminiApiKey, recipe }),
+                () => generateRecipeScript({ apiKey: effectiveApiKey, model: effectiveModel, recipe, useAI: Boolean(effectiveApiKey) })
+              ],
+              recipe
+            })
           : await generateRecipeScript({ apiKey: effectiveApiKey, model: effectiveModel, recipe, useAI: Boolean(effectiveApiKey) });
         return json(res, 200, result);
       }
@@ -116,28 +180,40 @@ export function createRequestHandler({
       if (url.pathname === "/api/generate-images" && req.method === "POST") {
         const body = await readJson(req);
         const scenes = validateScenes(body.scenes);
-        try {
-          if (effectiveGeminiApiKey) {
-            return json(res, 200, { provider: "gemini", images: await generateSceneImagesWithGemini({ apiKey: effectiveGeminiApiKey, scenes }) });
-          }
-          if (effectiveApiKey) {
-            return json(res, 200, { provider: "openai", images: await generateSceneImagesWithOpenAI({ apiKey: effectiveApiKey, scenes }) });
-          }
-          if (!effectiveStabilityApiKey) return json(res, 400, { error: "이미지 생성을 위해 GEMINI_API_KEY, OPENAI_API_KEY 또는 STABILITY_API_KEY가 필요합니다." });
-          return json(res, 200, { provider: "stability", images: await generateSceneImages({ apiKey: effectiveStabilityApiKey, scenes }) });
-        } catch (error) {
-          if (effectiveStabilityApiKey) {
-            return json(res, 200, { provider: "stability", images: await generateSceneImages({ apiKey: effectiveStabilityApiKey, scenes }) });
-          }
-          throw error;
+        const providers = buildImageProviders({
+          effectiveImageApiUrl,
+          imageApiKey,
+          imageModel,
+          effectiveApiKey,
+          effectiveGeminiApiKey,
+          effectiveStabilityApiKey,
+          scenes
+        });
+        if (providers.length === 0) {
+          return json(res, 400, { error: "이미지 생성을 위해 IMAGE_API_URL, OPENAI_API_KEY, GEMINI_API_KEY 또는 STABILITY_API_KEY가 필요합니다." });
         }
+        const jobId = `img_${Date.now()}_${++imageJobCounter}`;
+        imageJobs.set(jobId, { jobId, status: "queued", provider: null, images: null, error: null, logs: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+        runImageJob({ jobId, providers, imageJobs });
+        return json(res, 202, { jobId, status: "queued", pollUrl: `/api/image-jobs/${jobId}` });
+      }
+
+      if (parts[0] === "api" && parts[1] === "image-jobs" && parts[2] && req.method === "GET") {
+        const job = imageJobs.get(decodeURIComponent(parts[2]));
+        if (!job) return json(res, 404, { error: "이미지 작업을 찾을 수 없습니다." });
+        return json(res, 200, job);
       }
 
       if (url.pathname === "/api/generate-video" && req.method === "POST") {
         const body = await readJson(req);
         const scenes = validateScenes(body.scenes);
         const images = Array.isArray(body.images) ? body.images : [];
-        return json(res, 200, await generateVideoFromScenes({ apiKey: effectiveApiKey, scenes, images }));
+        
+        // Use OpenAI TTS for video generation (reliable and working)
+        return json(res, 200, await generateVideoFromScenes({
+          apiKey: effectiveApiKey, scenes, images,
+          ttsUrl: effectiveTtsApiUrl, ttsApiKey, ttsModel, ttsVoice
+        }));
       }
 
       if (url.pathname.startsWith("/api/")) return json(res, 404, { error: "API 경로를 찾을 수 없습니다." });
@@ -161,16 +237,65 @@ export function createRequestHandler({
 
 export default createRequestHandler();
 
-async function generateGeminiScriptWithFallback({ apiKey, title, recipe, type }) {
-  try {
-    if (type === "title") {
-      return await generateGeminiScriptFromTitle({ apiKey, title });
+function buildImageProviders({
+  effectiveImageApiUrl,
+  imageApiKey,
+  imageModel,
+  effectiveApiKey,
+  effectiveGeminiApiKey,
+  effectiveStabilityApiKey,
+  scenes
+}) {
+  const providers = [];
+  if (effectiveImageApiUrl) providers.push({
+    name: "tunnel",
+    run: () => generateSceneImagesWithTunnel({ url: effectiveImageApiUrl, apiKey: imageApiKey, model: imageModel, scenes })
+  });
+  if (effectiveApiKey) providers.push({ name: "openai", run: () => generateSceneImagesWithOpenAI({ apiKey: effectiveApiKey, scenes }) });
+  if (effectiveGeminiApiKey) providers.push({ name: "gemini", run: () => generateSceneImagesWithGemini({ apiKey: effectiveGeminiApiKey, scenes }) });
+  if (effectiveStabilityApiKey) providers.push({ name: "stability", run: () => generateSceneImages({ apiKey: effectiveStabilityApiKey, scenes }) });
+  return providers;
+}
+
+async function runImageJob({ jobId, providers, imageJobs }) {
+  let lastError = null;
+  for (const provider of providers) {
+    const job = imageJobs.get(jobId);
+    if (!job) return;
+    job.status = "running";
+    job.provider = provider.name;
+    job.logs = Array.isArray(job.logs) ? job.logs : [];
+    job.updatedAt = new Date().toISOString();
+    imageJobs.set(jobId, job);
+    try {
+      const images = await provider.run();
+      imageJobs.set(jobId, { ...job, status: "completed", images, updatedAt: new Date().toISOString() });
+      return;
+    } catch (error) {
+      lastError = error;
+      const message = error.message || "이미지 생성 실패";
+      imageJobs.set(jobId, {
+        ...job,
+        logs: [...job.logs, { provider: provider.name, status: "failed", message }],
+        error: message,
+        updatedAt: new Date().toISOString()
+      });
     }
-    return await generateGeminiScriptFromRecipe({ apiKey, recipe });
-  } catch (error) {
-    const fallbackRecipe = recipe || inferRecipeFromTitle(title);
-    return { ...buildFallbackScript(fallbackRecipe), source: "template" };
   }
+  const job = imageJobs.get(jobId);
+  if (job) imageJobs.set(jobId, { ...job, status: "failed", error: lastError?.message || job.error || "이미지 생성 실패", updatedAt: new Date().toISOString() });
+}
+
+async function generateScriptWithFallback({ providers, title, recipe }) {
+  for (const provider of providers) {
+    try {
+      return await provider();
+    } catch (error) {
+      continue;
+    }
+  }
+  const fallbackRecipe = recipe || inferRecipeFromTitle(title);
+  return { ...buildFallbackScript(fallbackRecipe), source: "template" };
 }
 
 function normalizeApiKey(value) {
@@ -180,6 +305,11 @@ function normalizeApiKey(value) {
 function normalizeModel(value) {
   const model = String(value || "").trim();
   return model || "gpt-5.4-nano";
+}
+
+function normalizeUrl(value, trimSlash = true) {
+  const url = String(value || "").trim();
+  return trimSlash ? url.replace(/\/+$/, "") : url;
 }
 
 function validateRecipe(body) {
@@ -242,7 +372,7 @@ function readJson(req) {
     let data = "";
     req.on("data", (chunk) => {
       data += chunk;
-      if (data.length > 1_000_000) { const error = badRequest("요청 데이터가 너무 큽니다."); reject(error); req.destroy(); }
+      if (data.length > 50_000_000) { const error = badRequest("요청 데이터가 너무 큽니다."); reject(error); req.destroy(); }
     });
     req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}); } catch { reject(badRequest("JSON 형식이 올바르지 않습니다.")); } });
     req.on("error", reject);

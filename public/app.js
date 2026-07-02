@@ -1,4 +1,4 @@
-const state = { recipes: [], schedules: [], dashboard: null, health: null, page: "dashboard", script: null, images: [], video: null };
+const state = { recipes: [], schedules: [], dashboard: null, health: null, page: "dashboard", script: null, images: [], video: null, imageJobLog: [] };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const statusText = { draft: "아이디어", ready: "촬영 준비", published: "업로드 완료", planned: "기획 중", scheduled: "예약 완료" };
@@ -161,27 +161,32 @@ async function generateScript(event) {
   event?.preventDefault();
   const values = Object.fromEntries(new FormData($("#scriptInputForm")));
   const button = $("#generateScript"); button.disabled = true; button.textContent = "대본 구성 중...";
-  try { state.script = await api("/api/generate-script", { method: "POST", body: { title: values.title } }); state.images = []; renderScript(); toast(["ai", "gemini"].includes(state.script.source) ? "AI가 레시피와 대본을 만들었어요." : "레시피와 촬영 대본을 만들었어요."); }
+  try { state.script = await api("/api/generate-script", { method: "POST", body: { title: values.title } }); state.images = []; renderScript(); toast(["ai", "gemini", "ollama"].includes(state.script.source) ? "AI가 레시피와 대본을 만들었어요." : "레시피와 촬영 대본을 만들었어요."); }
   catch (error) { toast(error.message, true); }
   finally { button.disabled = false; button.innerHTML = '<svg><use href="#i-spark"/></svg>40초 대본 생성'; }
 }
 
 function renderScript() {
   const script = state.script;
-  const sourceText = script.source === "gemini" ? "Gemini 초안" : script.source === "ai" ? "OpenAI 초안" : "자동 구성";
-  $("#scriptResult").innerHTML = `<article class="script-sheet"><header><div><p>YOUTUBE SHORTS · ${script.duration} SEC</p><h2>${escapeHtml(script.title)}</h2><p>썸네일: ${escapeHtml(script.thumbnail)} · ${sourceText}</p></div><div class="script-actions"><button class="secondary" id="copyScript">대본 복사</button><button class="primary" id="generateImages" ${state.health?.imageEnabled ? "" : "disabled"}>장면 이미지 4장 생성</button><button class="secondary" id="generateVideo" ${state.images.length === 4 ? "" : "disabled"}>영상 만들기</button></div></header>${script.scenes.map((scene, index) => `<section class="script-scene"><div class="scene-time"><b>${escapeHtml(scene.range)}</b><span>${escapeHtml(scene.label)}</span></div><div><h3>내레이션 / 자막</h3><p>${escapeHtml(scene.narration)}</p></div><div>${state.images[index] ? `<img class="scene-image" src="${state.images[index].imageDataUrl}" alt="${escapeHtml(scene.label)} 장면 이미지" />` : ""}<h3>촬영 화면</h3><p>${escapeHtml(scene.visual)}</p></div></section>`).join("")}<div class="hashtags">${script.hashtags.map(escapeHtml).join(" ")}</div>${state.video ? `<div class="video-preview"><video controls src="${state.video.videoDataUrl}"></video></div>` : ""}</article>`;
+  const sourceText = script.source === "ollama" ? "Ollama 초안" : script.source === "gemini" ? "Gemini 초안" : script.source === "ai" ? "OpenAI 초안" : "자동 구성";
+  const logHtml = state.imageJobLog.length
+    ? `<section class="image-log"><h3>이미지 생성 로그</h3>${state.imageJobLog.map((entry) => `<p class="${escapeHtml(entry.status || "info")}">${escapeHtml(entry.provider)}: ${escapeHtml(entry.message)}</p>`).join("")}</section>`
+    : "";
+  $("#scriptResult").innerHTML = `<article class="script-sheet"><header><div><p>YOUTUBE SHORTS · ${script.duration} SEC</p><h2>${escapeHtml(script.title)}</h2><p>썸네일: ${escapeHtml(script.thumbnail)} · ${sourceText}</p></div><div class="script-actions"><button class="secondary" id="copyScript">대본 복사</button><button class="primary" id="generateImages" ${state.health?.imageEnabled ? "" : "disabled"}>장면 이미지 4장 생성</button><button class="secondary" id="generateVideo">영상 만들기</button></div></header>${script.scenes.map((scene, index) => `<section class="script-scene"><div class="scene-time"><b>${escapeHtml(scene.range)}</b><span>${escapeHtml(scene.label)}</span></div><div><h3>내레이션 / 자막</h3><p>${escapeHtml(scene.narration)}</p></div><div>${state.images[index] ? `<img class="scene-image" src="${state.images[index].imageDataUrl}" alt="${escapeHtml(scene.label)} 장면 이미지" />` : ""}<h3>촬영 화면</h3><p>${escapeHtml(scene.visual)}</p></div></section>`).join("")}${logHtml}<div class="hashtags">${script.hashtags.map(escapeHtml).join(" ")}</div>${state.video ? `<div class="video-preview"><video controls src="${state.video.videoDataUrl}"></video></div>` : ""}</article>`;
   $("#copyScript").addEventListener("click", copyScript);
   $("#generateImages").addEventListener("click", generateImages);
   $("#generateVideo").addEventListener("click", generateVideo);
 }
 
 async function generateImages() {
-  if (!state.health?.imageEnabled) return toast(".env에 STABILITY_API_KEY를 입력하고 서버를 다시 시작해주세요.", true);
+  if (!state.health?.imageEnabled) return toast(".env에 IMAGE_API_URL을 입력하고 서버를 다시 시작해주세요.", true);
   const button = $("#generateImages");
   button.disabled = true; button.textContent = "이미지 생성 중...";
   try {
-    const result = await api("/api/generate-images", { method: "POST", body: { scenes: state.script.scenes } });
+    const submitted = await api("/api/generate-images", { method: "POST", body: { scenes: state.script.scenes } });
+    const result = submitted?.jobId ? await waitForImageJob(submitted.jobId) : submitted;
     state.images = result.images;
+    state.imageJobLog = result.logs || [];
     renderScript();
     toast("9:16 장면 이미지 4장을 만들었어요.");
   } catch (error) {
@@ -190,12 +195,28 @@ async function generateImages() {
   }
 }
 
+async function waitForImageJob(jobId) {
+  const deadline = Date.now() + 10 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const job = await api(`/api/image-jobs/${encodeURIComponent(jobId)}`);
+    if (job.status === "completed") return { provider: job.provider, images: job.images, logs: job.logs || [] };
+    if (job.status === "failed") throw new Error(job.error || "이미지 생성에 실패했습니다.");
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  throw new Error("이미지 생성 시간이 너무 오래 걸립니다.");
+}
+
 async function generateVideo() {
-  if (!state.images.length) return toast("먼저 이미지 4장을 생성해주세요.", true);
   const button = $("#generateVideo");
   button.disabled = true; button.textContent = "영상 생성 중...";
   try {
-    const result = await api("/api/generate-video", { method: "POST", body: { scenes: state.script.scenes, images: state.images } });
+    const result = await api("/api/generate-video", { 
+      method: "POST", 
+      body: { 
+        scenes: state.script.scenes, 
+        images: state.images
+      } 
+    });
     state.video = result;
     renderScript();
     toast("영상 파일을 만들었어요.");
