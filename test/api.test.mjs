@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { JsonDatabase } from "../db.mjs";
 import { createApp } from "../server.mjs";
 import { generateRecipeScriptFromTitle } from "../openai-shorts.mjs";
@@ -58,6 +59,14 @@ function testWavBuffer() {
   buffer.writeUInt16LE(1, 22); buffer.writeUInt32LE(sampleRate, 24); buffer.writeUInt32LE(sampleRate * 2, 28);
   buffer.writeUInt16LE(2, 32); buffer.writeUInt16LE(16, 34); buffer.write("data", 36); buffer.writeUInt32LE(dataSize, 40);
   return buffer;
+}
+
+function testImageDataUrl(color) {
+  const image = execFileSync("ffmpeg", [
+    "-loglevel", "error", "-f", "lavfi", "-i", `color=c=${color}:s=16x16`,
+    "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1"
+  ]);
+  return `data:image/png;base64,${image.toString("base64")}`;
 }
 
 test("헬스 체크와 초기 대시보드를 반환한다", () => withServer(async (baseUrl) => {
@@ -389,7 +398,7 @@ test("터널 이미지가 실패하면 OpenAI 이미지로 자동 대체한다",
   }
 });
 
-test("영상 생성 API가 이미지 없이 대본 음성으로 mp4를 반환한다", async () => {
+test("영상 생성 API가 4개 장면 이미지와 대본 음성으로 mp4를 반환한다", async () => {
   const originalFetch = globalThis.fetch;
   let ttsCalls = 0;
   globalThis.fetch = async (url, options) => {
@@ -428,7 +437,9 @@ test("영상 생성 API가 이미지 없이 대본 음성으로 mp4를 반환한
           { range: "8~30초", narration: "세 번째 장면", visual: "조리" },
           { range: "30~40초", narration: "네 번째 장면", visual: "완성" }
         ],
-        images: [{ imageDataUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAIAAeIhvAAAAAElFTkSuQmCC" }]
+        images: ["red", "green", "blue", "yellow"].map((color) => ({
+          imageDataUrl: testImageDataUrl(color)
+        }))
       }
     });
     assert.equal(response.response.status, 200);

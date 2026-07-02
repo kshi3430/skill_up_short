@@ -23,7 +23,7 @@ export async function generateVideoFromScenes({ apiKey, scenes, images, ttsUrl =
   } else {
     audio = await synthesizeSpeech({ apiKey: effectiveApiKey, text: narration });
   }
-  const videoDataUrl = await buildSimpleMp4FromAudio({ audio, images });
+  const videoDataUrl = await buildSimpleMp4FromAudio({ audio, images, scenes });
   return { videoDataUrl };
 }
 
@@ -51,7 +51,7 @@ async function synthesizeSpeech({ apiKey, text }) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-async function buildSimpleMp4FromAudio({ audio, images = [] }) {
+async function buildSimpleMp4FromAudio({ audio, images = [], scenes = [] }) {
   const { mkdirSync, rmSync } = await import("node:fs");
   const { writeFile, readFile } = await import("node:fs/promises");
   const path = await import("node:path");
@@ -82,32 +82,40 @@ async function buildSimpleMp4FromAudio({ audio, images = [] }) {
     if (!Number.isFinite(duration) || duration <= 0) throw new Error("TTS 음성 길이를 확인하지 못했습니다.");
     const output = path.join(tmpDir, "output.mp4");
 
-    const firstImage = Array.isArray(images) ? images.find((image) => typeof image?.imageDataUrl === "string") : null;
-    const imageDataUrl = firstImage?.imageDataUrl || "";
+    const sceneImages = Array.isArray(images)
+      ? images.slice(0, 4).map((image) => typeof image?.imageDataUrl === "string" ? image.imageDataUrl : "")
+      : [];
+    const hasAllSceneImages = sceneImages.length === 4 && sceneImages.every(Boolean);
 
     let ffmpegArgs;
-    if (imageDataUrl) {
-      const match = imageDataUrl.match(/^data:(image\/[^;]+);base64,(.+)$/);
-      if (match) {
-        const ext = match[1].split("/")[1] || "png";
-        const imageFile = path.join(tmpDir, `scene.${ext === "jpeg" ? "jpg" : ext}`);
+    if (hasAllSceneImages) {
+      const sceneDurations = calculateSceneDurations(scenes, duration);
+      const imageFiles = [];
+      for (const [index, imageDataUrl] of sceneImages.entries()) {
+        const match = imageDataUrl.match(/^data:(image\/(?:png|jpeg|jpg|webp));base64,([A-Za-z0-9+/=\s]+)$/);
+        if (!match) throw new Error(`장면 ${index + 1} 이미지 형식이 올바르지 않습니다.`);
+        const ext = match[1].split("/")[1];
+        const imageFile = path.join(tmpDir, `scene-${index + 1}.${ext === "jpeg" ? "jpg" : ext}`);
         await writeFile(imageFile, Buffer.from(match[2], "base64"));
-        ffmpegArgs = [
-          "-loop", "1", "-i", imageFile,
-          "-i", audioFile,
-          "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
-          "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
-          "-movflags", "+faststart", output
-        ];
-      } else {
-        ffmpegArgs = [
-          "-f", "lavfi", "-i", `color=c=#1f2923:s=540x960:r=24:d=${duration.toFixed(3)}`,
-          "-i", audioFile,
-          "-shortest", "-c:v", "libx264", "-preset", "ultrafast",
-          "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
-          "-movflags", "+faststart", output
-        ];
+        imageFiles.push(imageFile);
       }
+
+      const imageInputs = imageFiles.flatMap((imageFile) => ["-i", imageFile]);
+      const filters = sceneDurations.map((sceneDuration, index) =>
+        `[${index}:v]scale=540:960:force_original_aspect_ratio=increase,crop=540:960,setsar=1,` +
+        `zoompan=z=1:d=${Math.max(1, Math.round(sceneDuration * 24))}:s=540x960:fps=24,` +
+        `setpts=PTS-STARTPTS[v${index}]`
+      );
+      filters.push(`${sceneDurations.map((_, index) => `[v${index}]`).join("")}concat=n=4:v=1:a=0[v]`);
+      ffmpegArgs = [
+        ...imageInputs,
+        "-i", audioFile,
+        "-filter_complex", filters.join(";"),
+        "-map", "[v]", "-map", "4:a:0",
+        "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+        "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart", output
+      ];
     } else {
       ffmpegArgs = [
         "-f", "lavfi", "-i", `color=c=#1f2923:s=540x960:r=24:d=${duration.toFixed(3)}`,
@@ -125,4 +133,16 @@ async function buildSimpleMp4FromAudio({ audio, images = [] }) {
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
+}
+
+export function calculateSceneDurations(scenes, audioDuration) {
+  const fallbackWeights = [3, 5, 22, 10];
+  const weights = Array.from({ length: 4 }, (_, index) => {
+    const match = String(scenes?.[index]?.range || "").match(/(\d+(?:\.\d+)?)\s*[~～-]\s*(\d+(?:\.\d+)?)/);
+    if (!match) return fallbackWeights[index];
+    const sceneDuration = Number(match[2]) - Number(match[1]);
+    return Number.isFinite(sceneDuration) && sceneDuration > 0 ? sceneDuration : fallbackWeights[index];
+  });
+  const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+  return weights.map((weight) => audioDuration * weight / totalWeight);
 }
